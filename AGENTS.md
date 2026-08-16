@@ -10,7 +10,8 @@ onenote2md-ink --source <same>                   --out <same>
 ```
 
 1. **Extract.** One markdown file per page, images beside it, XPS printouts converted to
-   PDF, a per-section report of what was found and what was skipped.
+   PDF at the end of the run in parallel, and two reports: `_extraction log.txt` (the whole
+   corpus, rebuilt from the pages on disk) and `_extraction runs.txt` (this run, appended).
 2. **Ink.** Renders handwriting to SVG and links it into the pages. Reads the extract to
    find which sections contain ink, so it only re-parses those. Run any time after step 1.
 

@@ -68,7 +68,17 @@ that failed is retried.
 
 The ink checklist is rebuilt by reading the written markdown back (`_ink_rows`) rather than
 from what the current run extracted, so resuming cannot produce a checklist missing pages an
-earlier run found.
+earlier run found. The same applies to every file that claims to describe the corpus, so the
+output is split by what each file is *for*:
+
+    _extraction log.txt    the corpus, rebuilt from the frontmatter on disk (`_corpus_summary`)
+    _extraction runs.txt   this run's transcript, appended under a dated header
+
+Neither can be partial: the first is derived from the output itself, the second is only ever
+added to. The rule generalises — **a file that claims to describe the whole extract is built by
+reading the extract, never by collecting as you go.** Written the other way round, a resumed
+run silently replaces the log with the handful of sections it did not skip, and it still looks
+like a log.
 
 ## Ink
 
@@ -95,6 +105,7 @@ page anyway.
 """
 
 import argparse
+import datetime
 import importlib.util
 import json
 import os
@@ -667,11 +678,15 @@ def _repoint(converted, log):
 def convert_xps(out: Path, log, workers: int = 5) -> tuple:
     """Convert `.xps` already written under `out`, and repoint the markdown that links them.
 
-    The same `_to_pdf` the extractor now uses inline, applied to output extracted before it
-    existed — re-parsing 4 GB of `.one` to rewrite files already on disk would cost far more
-    than reading them. Idempotent twice over: a file whose PDF exists is skipped, and
-    repointing re-runs over everything, so an interrupted run costs only what it had not
-    reached.
+    **The only place XPS is converted.** A run calls this after its sections; `--convert-xps`
+    calls it alone, for output extracted before it existed. `write_section` used to convert
+    inline as well, one file at a time on the main thread, so the same job existed twice and
+    the copy every normal extraction used was the slow one — a fifth of the throughput, on the
+    kind of section that holds a thousand multi-page printouts.
+
+    Idempotent twice over: a file whose PDF exists is skipped, and repointing re-runs over
+    everything, so an interrupted run costs only what it had not reached. That is what makes it
+    safe to call unconditionally at the end of a run.
 
     The work is CPU-bound in MuPDF, not I/O-bound, so it runs in a process pool.
 
@@ -711,10 +726,6 @@ def convert_xps(out: Path, log, workers: int = 5) -> tuple:
         f'{reclaimable / 1e9:.2f} GB of .xps now redundant (kept — delete when satisfied)')
     return len(ok), len(bad), reclaimable
 
-    log(f'\nXPS  {ok} converted, {bad} failed, '
-        f'{reclaimable / 1e9:.2f} GB of .xps now redundant (kept — delete when satisfied)')
-    return ok, bad, reclaimable
-
 
 def write_section(notebook, section, path, out_dir, OneDocment, log, dead, resume=False):
     sec_dir = out_dir / _safe(notebook, 'Notebook') / _safe(section, 'Section')
@@ -740,7 +751,7 @@ def write_section(notebook, section, path, out_dir, OneDocment, log, dead, resum
         dead.append((notebook, section, f'{type(e).__name__}: {e}'))
         return 0, 0, 0
 
-    n_ink = n_img = n_xps = n_xps_bad = 0
+    n_ink = n_img = n_xps = 0
     with share_umask():
         sec_dir.mkdir(parents=True, exist_ok=True)
         for i, page in enumerate(pages, 1):
@@ -757,12 +768,12 @@ def write_section(notebook, section, path, out_dir, OneDocment, log, dead, resum
                     if not data:
                         continue
                     ext = (files[ref].get('extension') or '').lstrip('.').lower() or 'bin'
-                    if ext == 'xps':
-                        try:
-                            data, ext = _to_pdf(data), 'pdf'
-                            n_xps += 1
-                        except Exception:
-                            n_xps_bad += 1   # keep the XPS rather than lose the document
+                    # Written as `.xps` and converted afterwards by `convert_xps`, in a pool.
+                    # Converting here meant doing it one file at a time on the main thread
+                    # while the other cores idled. That pass already existed, is already
+                    # idempotent and already repoints the links, so this is one implementation
+                    # rather than two that have drifted.
+                    n_xps += ext == 'xps'
                     fname = f'{k:02d}.{ext}'
                     (fdir / fname).write_bytes(data)
                     links.append(f'![[{fdir.name}/{fname}]]'
@@ -789,8 +800,7 @@ def write_section(notebook, section, path, out_dir, OneDocment, log, dead, resum
                 + (OCR_HEADING + '\n\n'.join(page['ocr']) if page['ocr'] else '') + '\n')
 
     log(f'  {section:<42} {len(pages):>4} pages  {n_img:>4} images  {n_ink:>3} ink'
-        + (f'  {n_xps:>4} xps→pdf' if n_xps else '')
-        + (f'  {n_xps_bad} XPS FAILED' if n_xps_bad else '')
+        + (f'  {n_xps:>4} xps' if n_xps else '')
         + f'  [{note}]')
     return len(pages), n_img, n_ink
 
@@ -828,6 +838,59 @@ def _ink_rows(out: Path) -> list:
             rows.append(tuple(meta.get(k, '') for k in (
                 'notebook', 'section', 'title', 'created', 'ink_confidence', 'ink_nodes')))
     return sorted(rows)
+
+
+def _now() -> str:
+    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+
+
+def _page_meta(out: Path):
+    """Every extracted page's frontmatter, from disk. The one reader of the written output."""
+    for md in sorted(out.rglob('*.md')):
+        if md.name.startswith('_'):
+            continue
+        head = md.read_text(errors='replace').split('\n---\n', 1)[0]
+        yield dict((k.strip(), v.strip())
+                   for k, _, v in (line.partition(':') for line in head.splitlines()))
+
+
+def _corpus_summary(out: Path) -> str:
+    """Per-section figures rebuilt by reading the written markdown back.
+
+    Written from the run's own log lines instead, a `--resume` run replaces the whole file with
+    the handful of sections it did not skip and every earlier section's figures are gone. That
+    is the trap `_ink_rows()` already existed to avoid, in a file with the same job: describe
+    the corpus, not the run. Everything needed is in the frontmatter.
+    """
+    sections, order = {}, []
+    for meta in _page_meta(out):
+        key = (meta.get('notebook', ''), meta.get('section', ''))
+        if key not in sections:
+            sections[key] = {'pages': 0, 'images': 0, 'ink': 0, 'note': meta.get('note', '')}
+            order.append(key)
+        row = sections[key]
+        row['pages'] += 1
+        row['images'] += int(meta.get('images', 0) or 0)
+        row['ink'] += meta.get('handwriting') == 'true'
+        # `note` is a property of the section's parse, so any page carries it; keep the first
+        # non-empty one rather than the last, which is blank on most pages.
+        if not row['note'].strip('"'):
+            row['note'] = meta.get('note', '')
+
+    lines = [f'# The corpus on disk, as of {_now()}', '',
+             'Rebuilt by reading every extracted page back, so it describes the whole extract',
+             'and not just the sections the last run touched. Per-run transcripts, including',
+             'failures and skips, are in `_extraction runs.txt`.', '']
+    total = [0, 0, 0]
+    for notebook, section in order:
+        r = sections[(notebook, section)]
+        total = [a + b for a, b in zip(total, (r['pages'], r['images'], r['ink']))]
+        note = r['note'].strip('"')
+        lines.append(f'{notebook} / {section:<42} {r["pages"]:>4} pages  {r["images"]:>5} images  '
+                     f'{r["ink"]:>3} ink' + (f'  [{note}]' if note else ''))
+    lines += ['', f'{len(order)} sections  {total[0]} pages  {total[1]} images  {total[2]} ink '
+                  f'pages', '']
+    return '\n'.join(lines)
 
 
 def _checklist(ink, dead) -> str:
@@ -872,7 +935,7 @@ def main():
     ap.add_argument('--convert-xps', action='store_true',
                     help='convert .xps already under --out to PDF; no extraction, no --source')
     ap.add_argument('--workers', type=int, default=5,
-                    help='parallel conversion processes for --convert-xps (default 5)')
+                    help='parallel processes for XPS conversion (default 5)')
     ap.add_argument('--exclude', action='append', default=[], metavar='GLOB',
                     help='skip source files matching this (repeatable). For a notebook that '
                          'has been superseded by a re-export — leaving both in place '
@@ -937,10 +1000,23 @@ def main():
 
     log(f'\nTOTAL  {totals[0]} pages  {totals[1]} images  {totals[2]} ink pages')
 
+    # The sections wrote `.xps` untouched; convert them all here, in the pool. Doing it as part
+    # of the run rather than leaving it to a second command keeps one invocation doing the whole
+    # job — and the pass is idempotent, so it costs nothing when there is none.
+    if any(out.rglob('*.xps')):
+        log('')
+        convert_xps(out, log, args.workers)
+
     with share_umask():
         out.mkdir(parents=True, exist_ok=True)
         (out / '_INK PAGES TO EXPORT.md').write_text(_checklist(_ink_rows(out), dead))
-        (out / '_extraction log.txt').write_text('\n'.join(log_lines) + '\n')
+        # Two files, each complete by construction. The summary is rebuilt from disk so a
+        # resumed run cannot leave it describing only the sections it touched; the transcript
+        # is appended so no run's failures are ever written over.
+        (out / '_extraction log.txt').write_text(_corpus_summary(out))
+        with (out / '_extraction runs.txt').open('a') as f:
+            f.write(f'\n{"=" * 78}\n=== run {_now()}\n{"=" * 78}\n'
+                    + '\n'.join(log_lines) + '\n')
 
 
 if __name__ == '__main__':

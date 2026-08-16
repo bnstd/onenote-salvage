@@ -35,8 +35,8 @@ For `onenote2md`. The ink pass takes `--source`, `--out`, `--work`, `--exclude` 
 | `--out PATH` | Where to write the markdown |
 | `--resume` | Skip sections that already produced output; retries failures |
 | `--exclude GLOB` | Skip matching source files (repeatable) |
-| `--convert-xps` | Convert `.xps` files already under `--out` to PDF; no extraction |
-| `--workers N` | Parallel processes for `--convert-xps` (default 5) |
+| `--convert-xps` | Only convert `.xps` already under `--out` to PDF; no extraction. A normal run does this itself |
+| `--workers N` | Parallel processes for XPS conversion (default 5) |
 | `--work PATH` | Scratch directory for unpacking (default `/tmp/onenote2md`) |
 | `--max-memory-gb N` | Address-space cap, so a corrupt section fails alone (default 2.0) |
 | `--umask OCTAL` | Umask for written files, e.g. `007` for a group-writable share |
@@ -68,7 +68,13 @@ OneNote's own OCR of that image, not something you typed, so a page of scans can
 report a six-figure character count and look like a long note. Use `ocr_chars` to spot
 documents masquerading as notes.
 
-Each run also writes a report of what was found per section, including anything skipped.
+Alongside the pages, three reports:
+
+| File | |
+|---|---|
+| `_extraction log.txt` | Per-section figures for the whole extract, rebuilt by reading the written pages back — so a `--resume` run cannot leave it describing only the sections it touched |
+| `_extraction runs.txt` | Each run's transcript, appended under a dated header, including failures and skips |
+| `_INK PAGES TO EXPORT.md` | Pages whose handwriting the ink pass could not place, to export from OneNote by hand |
 
 ## What it handles
 
