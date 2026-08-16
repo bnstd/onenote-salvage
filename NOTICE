@@ -1,0 +1,46 @@
+onenote2md
+Copyright 2026 the onenote2md authors
+
+Licensed under the Apache License, Version 2.0 (the "License"); see LICENSE.
+
+--------------------------------------------------------------------------------
+
+This product includes software from pyOneNote
+(https://github.com/DissectMalware/pyOneNote), Copyright Amirreza Niakanlahiji,
+licensed under the Apache License, Version 2.0.
+
+pyOneNote is used as a dependency and is NOT redistributed here. It is, however,
+MODIFIED AT IMPORT TIME: `onenote2md.extract._patch_module` rewrites its
+source in memory before executing it. Apache-2.0 section 4(b) asks that changes
+be stated, so they are listed here and each carries its reasoning in the source,
+in `_PATCHES` and `_DOC_PATCHES`.
+
+Changes made to pyOneNote 0.0.2:
+
+  1. ArrayOfPropertyValues (property type 0x10) raises NotImplementedError
+     upstream. Implemented per MS-ONE 2.6.10. The adjacent 0x11 branch calls a
+     five-argument constructor with one argument; fixed alongside.
+  2. Descending into child nodes assumes every node type set `self.data` with a
+     `.ref`. Three do not. The subtree is skipped instead of raising.
+  3. A file-data reference is followed without checking it. `isFcrNil()` is
+     defined upstream and never called; it is now, plus a bounds check.
+  4. `get_compact_ids(count)` trusts a count read from the file. Bounded by the
+     number of ids the stream actually holds.
+  5. An object declaration seeks to its own `ref` unchecked. Bounded, and a
+     failed parse is contained to that object.
+  6. `ObjectSpaceObjectStreamOfIDs.Count` bounded: each CompactID is four bytes,
+     so the count cannot exceed the bytes remaining.
+  7. `FileDataStoreObject.cbLength` bounded by the size its chunk declares.
+  8. Rendering a CompactID assumes its index is in the revision's id table. It
+     degrades to a marker instead of raising KeyError.
+  9. `PrtFourBytesOfLengthFollowedByData.cb` bounded by the file size.
+ 10. FileNodeListFragment magic (0xA4567AB1F5F7F4C4) is read upstream and never
+     compared. It is now, and references are bounded to the file.
+ 11. Text in a four-bytes-of-length property is decoded as UTF-16 with .hex() as
+     the fallback. Single-byte text of odd length cannot be UTF-16, so real text
+     became a hex dump. UTF-8 is tried first.
+ 12. `_files[guid]["identity"]` keeps only the last identity a blob was declared
+     under, losing every page that referenced an earlier one. All are kept.
+
+Additionally, unrecognised jcids are reported with their number rather than all
+being labelled "Unknown", which is what makes ink identifiable.

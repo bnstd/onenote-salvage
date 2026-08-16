@@ -1,0 +1,28 @@
+[project]
+name = "onenote2md"
+version = "0.1.0"
+description = "Extract OneNote notebooks to markdown, with images, printouts and handwriting"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+keywords = ["onenote", "onepkg", "markdown", "obsidian", "migration", "ink"]
+dependencies = [
+    # Pinned deliberately: pyOneNote is unmaintained and 0.0.2 is its only release, and the
+    # parser fixes in _PATCHES anchor on exact excerpts of its source. A pin is what makes
+    # patching-at-import safe rather than fragile.
+    "pyOneNote==0.0.2",
+    "libarchive-c",
+    "pymupdf",
+    "pillow",
+]
+
+[project.scripts]
+onenote2md = "onenote2md.extract:main"
+onenote2md-ink = "onenote2md.ink:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
