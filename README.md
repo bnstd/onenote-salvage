@@ -6,9 +6,36 @@ Export OneNote notebooks to markdown, with images, printouts and handwriting.
 
 ```bash
 pip install onenote2md
+sudo apt install cabextract      # or: brew install cabextract
 ```
 
-Requires Python 3.9+.
+Requires Python 3.9+ and **cabextract**, which unpacks the `.onepkg` cabinets.
+
+<details>
+<summary>Why cabextract is required rather than optional</summary>
+
+A `.onepkg` is a CAB compressed with LZX. libarchive — the obvious Python-native choice, and
+what this package used until now — silently returns the right number of bytes with the wrong
+values in them, for any part of a cabinet past the first **1 GiB**.
+
+LZX may rewrite the four-byte operand after each `0xE8` (x86 `CALL`) opcode, and the decoder
+must undo it. The spec stops translating after the first gigabyte of a folder's output;
+libarchive before 3.8.9 had no such limit, so every coincidental `0xE8` inside already
+compressed data past that mark had the next four bytes rewritten. The length is preserved
+exactly, so nothing fails — PNG chunk framing chains perfectly while every CRC fails, and the
+damaged images have the same size distribution as the healthy ones.
+
+On one 1.3 GB notebook that was four sections: 112 undecodable images, and one 60 MB section
+that failed to parse at all. Under 1 GiB the two decoders never disagree, which is why this
+went unnoticed on smaller exports.
+
+libarchive [fixed it in 3.8.9](https://github.com/libarchive/libarchive/commit/220eefe34)
+(2026-07-28), but `libarchive-c` binds whatever system library is present and cannot pin a
+version at install time — so relying on it means a runtime check and a hard error. Ubuntu
+24.04 ships 3.7.2 and Debian 12 ships 3.6.2, both affected. cabextract is 200 KB and always
+correct, so `_sections()` requires it and raises rather than falling back.
+
+</details>
 
 ## Usage
 

@@ -111,6 +111,8 @@ import json
 import os
 import re
 import resource
+import shutil
+import subprocess
 import sys
 import traceback
 from collections import Counter, defaultdict
@@ -492,7 +494,22 @@ def _clean(text: str) -> str:
 
 
 def _safe(name: str, fallback: str) -> str:
-    return (BAD.sub('-', name).strip().strip('.') or fallback)[:80]
+    """A filename Windows, Nextcloud and Obsidian will all accept.
+
+    **The length cap applies to the stem, never the extension.** Callers pass whole filenames
+    as well as page titles, and cutting `... Community 01.png` at 80 characters left
+    `... Community 01.` — a trailing dot, which Nextcloud rejects outright, Windows clients
+    refuse to sync, and which loses the file's type. Stripping dots before the cut does not
+    help: the cut is what creates the last one, so it has to run again afterwards.
+
+    A suffix only counts as an extension when it is alphanumeric and at most six characters,
+    so a page title like `Meeting notes 3.5 hours` is left alone.
+    """
+    clean = BAD.sub('-', name).strip().strip('.') or fallback
+    stem, dot, ext = clean.rpartition('.')
+    if not (dot and 0 < len(ext) <= 6 and ext.isalnum()):
+        stem, dot, ext = clean, '', ''
+    return (stem[:80 - len(dot + ext)].strip().strip('.') or fallback[:80]) + dot + ext
 
 
 def parse_pages(path: Path, OneDocment):
@@ -805,19 +822,59 @@ def write_section(notebook, section, path, out_dir, OneDocment, log, dead, resum
     return len(pages), n_img, n_ink
 
 
-def _sections(pkg: Path, work: Path):
-    """Yield (section name, extracted path) for each .one inside a .onepkg (a CAB)."""
-    import libarchive
-    with libarchive.file_reader(str(pkg)) as arc:
-        for entry in arc:
-            name = entry.pathname.replace('\\', '/')
-            if not name.lower().endswith('.one'):
-                continue
-            tmp = work / 'current.one'
-            with open(tmp, 'wb') as f:
-                for block in entry.get_blocks():
-                    f.write(block)
-            yield re.sub(r'\.one$', '', name, flags=re.I).replace('/', ' - '), tmp
+def _sections(pkg: Path, work: Path, only=None):
+    """Yield (section name, extracted path) for each .one inside a .onepkg (a CAB).
+
+    **Unpacked with `cabextract`, not libarchive, and that is not a preference.** A `.onepkg`
+    is a CAB compressed with LZX, and libarchive before 3.8.9 returns the right number of
+    bytes with the wrong values in them — silently. Both decoders agree on the length of
+    `Filing/Other.one` (119,014,976) and differ in 276,291 bytes; carving CRC-checked PNGs
+    out of each tells the story:
+
+        libarchive   15 valid PNGs, 68 broken
+        cabextract   83 valid PNGs,  0 broken
+
+    **The trigger is position.** LZX may rewrite the four-byte operand after each `0xE8`
+    (x86 `CALL`) opcode and the decoder must undo it, but the spec stops translating after
+    the first 1 GiB of a folder's output. libarchive had no such limit, so every coincidental
+    `0xE8` inside already-compressed data past that mark had the following four bytes
+    rewritten. `Insurances.one` proves it by straddling the boundary: it starts at folder
+    offset 977,167,482, 1 GiB falls 96,574,342 bytes in, and the first differing byte is at
+    96,593,691 with nothing before it differing at all.
+
+    So the damage is computable, not mysterious: sum the CAB directory's uncompressed sizes
+    and any section extending past 1 GiB was corrupted. In one 1.3 GB notebook that was four
+    sections — 112 undecodable images, and one that failed to parse at all.
+
+    libarchive fixed this in **3.8.9** (commit `220eefe34`, 2026-07-28), so requiring that
+    version is a defensible alternative. It is not the one taken here: `libarchive-c` binds
+    whatever system library is present and cannot pin a version at install time, so enforcing
+    it means a runtime check and a hard error — against a 200 KB apt package and a
+    `shutil.which()`. Distributions still shipping an affected version include Ubuntu 24.04
+    (3.7.2) and Debian 12 (3.6.2).
+    """
+    if not shutil.which('cabextract'):
+        raise SystemExit(
+            'cabextract is required to unpack .onepkg — `sudo apt install cabextract` '
+            '(or `brew install cabextract`).\n'
+            'libarchive is not a fallback: before 3.8.9 its LZX decoder silently corrupts '
+            'any part of a cabinet past the first 1 GiB.')
+    dest = work / 'sections'
+    shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    # `only` pulls just the named sections out of the cabinet. A `.onepkg` can be well over a
+    # gigabyte of `.one`, and a caller wanting two of them should not pay to unpack nineteen.
+    patterns = [f'*{s}.one' for s in only] if only else ['*.one']
+    cmd = ['cabextract', '-q']
+    for pat in patterns:
+        cmd += ['-F', pat]
+    r = subprocess.run(cmd + ['-d', str(dest), str(pkg)], capture_output=True, text=True)
+    if r.returncode != 0 and not any(dest.rglob('*.one')):
+        raise RuntimeError(f'cabextract failed on {pkg.name}: '
+                           f'{(r.stderr or r.stdout).strip()[:200]}')
+    for one in sorted(dest.rglob('*.one')):
+        name = str(one.relative_to(dest)).replace('\\', '/')
+        yield re.sub(r'\.one$', '', name, flags=re.I).replace('/', ' - '), one
 
 
 def _ink_rows(out: Path) -> list:
@@ -965,10 +1022,9 @@ def main():
 
     try:
         OneDocment = _patched_pyonenote()
-        import libarchive  # noqa: F401
         import pymupdf  # noqa: F401
     except ImportError as e:
-        raise SystemExit(f'{e}\n\n    pip install pyOneNote libarchive-c pymupdf')
+        raise SystemExit(f'{e}\n\n    pip install pyOneNote pymupdf')
 
     src = Path(args.source)
     work.mkdir(parents=True, exist_ok=True)
